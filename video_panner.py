@@ -41,7 +41,7 @@ def resize_and_center_overlay(overlay, target_width, target_height):
         target_height (int): The height of the target canvas
         
     Returns:
-        numpy.ndarray: The resized and centered overlay on a canvas of target dimensions
+        tuple: The resized overlay and placement coordinates
     """
     # Get the original dimensions
     h, w = overlay.shape[:2]
@@ -63,20 +63,11 @@ def resize_and_center_overlay(overlay, target_width, target_height):
     # Resize the image while preserving aspect ratio
     resized_overlay = cv2.resize(overlay, (new_width, new_height))
     
-    # Create a blank canvas with target dimensions
-    if overlay.shape[2] == 4:  # With alpha channel
-        canvas = np.zeros((target_height, target_width, 4), dtype=np.uint8)
-    else:
-        canvas = np.zeros((target_height, target_width, 3), dtype=np.uint8)
-    
     # Calculate position to center the resized image on the canvas
     y_offset = (target_height - new_height) // 2
     x_offset = (target_width - new_width) // 2
     
-    # Place the resized image on the canvas
-    canvas[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = resized_overlay
-    
-    return canvas
+    return resized_overlay, (y_offset, x_offset, new_height, new_width)
 
 def load_config(config_path):
     """Load and validate the configuration file."""
@@ -186,80 +177,99 @@ def process_video(config, verbose=False):
             cap.release()
             return None
         
-        # Load overlay if specified
-        overlay = None
+        # Load and pre-process overlay if specified
+        overlay_data = None
         if config['overlay'] != 'none':
             template_path = os.path.join('templates', config['overlay'])
             if os.path.exists(template_path):
                 overlay = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
                 if overlay is None:
                     print(f"Warning: Could not load overlay image at {template_path}")
-                elif verbose:
-                    print(f"Loaded overlay: {template_path}, shape: {overlay.shape}")
+                else:
+                    if verbose:
+                        print(f"Loaded overlay: {template_path}, shape: {overlay.shape}")
+                    # Pre-process overlay once instead of for every frame
+                    resized_overlay, placements = resize_and_center_overlay(overlay, OUTPUT_WIDTH, OUTPUT_HEIGHT)
+                    overlay_data = (resized_overlay, placements)
             else:
                 print(f"Warning: Overlay image not found at {template_path}")
+        
+        # Pre-allocate portrait frame to reuse
+        portrait_frame = np.zeros((OUTPUT_HEIGHT, OUTPUT_WIDTH, 3), dtype=np.uint8)
+        
+        # Calculate the vertical offset for cropping once
+        y_offset = (OUTPUT_HEIGHT - height) // 2
         
         # Process each frame
         current_frame = 0
         start_time = time.time()
+        
+        # Prepare array of x_offsets for the entire video
+        x_offsets = np.zeros(total_frames, dtype=np.int32)
+        
+        # Pre-calculate all x_offsets to avoid redundant calculations
+        for frame_idx in range(total_frames):
+            if frame_idx < markpoint1_frame:
+                # Before markpoint1: left-aligned
+                x_offsets[frame_idx] = 0
+            elif frame_idx < markpoint2_frame:
+                # Between markpoint1 and markpoint2: animate from left to center
+                progress = (frame_idx - markpoint1_frame) / max(1, (markpoint2_frame - markpoint1_frame))
+                max_offset = (width - OUTPUT_WIDTH) / 2  # Center position
+                x_offsets[frame_idx] = int(progress * max_offset)
+            elif frame_idx < markpoint3_frame:
+                # Between markpoint2 and markpoint3: animate from center to right
+                progress = (frame_idx - markpoint2_frame) / max(1, (markpoint3_frame - markpoint2_frame))
+                start_offset = (width - OUTPUT_WIDTH) / 2  # Center position
+                end_offset = width - OUTPUT_WIDTH  # Right-aligned position
+                x_offsets[frame_idx] = int(start_offset + (progress * (end_offset - start_offset)))
+            else:
+                # After markpoint3: right-aligned
+                x_offsets[frame_idx] = width - OUTPUT_WIDTH
+            
+            # Ensure x_offset is within bounds
+            x_offsets[frame_idx] = max(0, min(width - OUTPUT_WIDTH, x_offsets[frame_idx]))
         
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
             
-            # Calculate the x-offset for panning effect
-            if current_frame < markpoint1_frame:
-                # Before markpoint1: left-aligned
-                x_offset = 0
-            elif current_frame < markpoint2_frame:
-                # Between markpoint1 and markpoint2: animate from left to center
-                progress = (current_frame - markpoint1_frame) / max(1, (markpoint2_frame - markpoint1_frame))
-                max_offset = (width - OUTPUT_WIDTH) / 2  # Center position
-                x_offset = int(progress * max_offset)
-            elif current_frame < markpoint3_frame:
-                # Between markpoint2 and markpoint3: animate from center to right
-                progress = (current_frame - markpoint2_frame) / max(1, (markpoint3_frame - markpoint2_frame))
-                start_offset = (width - OUTPUT_WIDTH) / 2  # Center position
-                end_offset = width - OUTPUT_WIDTH  # Right-aligned position
-                x_offset = int(start_offset + (progress * (end_offset - start_offset)))
-            else:
-                # After markpoint3: right-aligned
-                x_offset = width - OUTPUT_WIDTH
+            # Get pre-calculated x_offset for current frame
+            x_offset = x_offsets[current_frame]
             
-            # Ensure x_offset is within bounds
-            x_offset = max(0, min(width - OUTPUT_WIDTH, x_offset))
+            # Crop the frame to get the 720 wide section - use direct slicing for efficiency
+            cropped_frame = frame[:, x_offset:x_offset+OUTPUT_WIDTH, :]
             
-            # Crop the frame to get the 720 wide section
-            cropped_frame = frame[:, int(x_offset):int(x_offset+OUTPUT_WIDTH), :]
-            
-            # Create portrait frame (720x1280)
-            portrait_frame = np.zeros((OUTPUT_HEIGHT, OUTPUT_WIDTH, 3), dtype=np.uint8)
+            # Clear the portrait frame for reuse (more efficient than creating a new array)
+            portrait_frame.fill(0)
             
             # Place cropped frame in the middle of the portrait frame vertically
-            y_offset = (OUTPUT_HEIGHT - height) // 2
             portrait_frame[y_offset:y_offset+height, :, :] = cropped_frame
             
-            # Add overlay if available
-            if overlay is not None:
-                # Resize overlay to match output dimensions while preserving aspect ratio
-                overlay_resized = resize_and_center_overlay(overlay, OUTPUT_WIDTH, OUTPUT_HEIGHT)
+            # Add overlay if available - use pre-processed data
+            if overlay_data is not None:
+                resized_overlay, placements = overlay_data
+                y_pos, x_pos, h, w = placements
                 
-                # Apply alpha blending for transparent overlay
-                if overlay_resized.shape[2] == 4:  # With alpha channel
-                    # Split the overlay into BGR and alpha channels
-                    bgr = overlay_resized[:, :, 0:3]
-                    alpha = overlay_resized[:, :, 3]
+                # Simple direct overlay with alpha if present
+                if resized_overlay.shape[2] == 4:  # With alpha channel
+                    # Get the overlay area in the portrait frame
+                    overlay_area = portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w]
                     
-                    # Create a mask and normalize
-                    alpha_norm = alpha / 255.0
-                    
-                    # Apply alpha blending for each channel
-                    for c in range(3):
-                        portrait_frame[:, :, c] = ((1.0 - alpha_norm) * portrait_frame[:, :, c] + 
-                                                 alpha_norm * bgr[:, :, c]).astype(np.uint8)
-                else:  # Without alpha channel
-                    portrait_frame = cv2.addWeighted(portrait_frame, 1, overlay_resized, 0.3, 0)
+                    # Apply overlay using a simpler method - much faster than complex NumPy operations
+                    for c in range(3):  # For each color channel
+                        overlay_area[:,:,c] = (
+                            overlay_area[:,:,c] * (255 - resized_overlay[:,:,3]) + 
+                            resized_overlay[:,:,c] * resized_overlay[:,:,3]
+                        ) // 255
+                else:
+                    # Just use OpenCV's addWeighted for non-transparent overlays
+                    cv2.addWeighted(
+                        portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w], 1,
+                        resized_overlay, 0.3, 0,
+                        dst=portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w]
+                    )
             
             # Write the frame to output video
             out.write(portrait_frame)
@@ -390,10 +400,12 @@ def process_batch(config, verbose=False):
         video_extensions = ['.mp4', '.mov', '.avi', '.mkv']
         processed_files = []
         
-        # Count the number of video files to process
-        video_files = [f for f in os.listdir(source_path) 
-                      if os.path.isfile(os.path.join(source_path, f)) 
-                      and os.path.splitext(f)[1].lower() in video_extensions]
+        # Get list of video files more efficiently
+        video_files = []
+        for f in os.listdir(source_path):
+            file_path = os.path.join(source_path, f)
+            if os.path.isfile(file_path) and os.path.splitext(f)[1].lower() in video_extensions:
+                video_files.append(f)
         
         if not video_files:
             print(f"No video files found in {source_path}")
@@ -401,12 +413,15 @@ def process_batch(config, verbose=False):
         
         print(f"Found {len(video_files)} video file(s) to process")
         
+        # Pre-copy the config to avoid repeated copies
+        base_config = config.copy()
+        
         for i, filename in enumerate(video_files):
             file_path = os.path.join(source_path, filename)
             
             print(f"\nProcessing file {i+1}/{len(video_files)}: {filename}")
-            # Create a copy of the config with the current file as source
-            file_config = config.copy()
+            # Use the base config and just update the source
+            file_config = base_config.copy()
             file_config['source'] = file_path
             
             # Process the video
