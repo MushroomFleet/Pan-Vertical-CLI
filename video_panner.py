@@ -30,6 +30,54 @@ EXPECTED_HEIGHT = 720
 OUTPUT_WIDTH = 720
 OUTPUT_HEIGHT = 1280
 
+def resize_and_center_overlay(overlay, target_width, target_height):
+    """
+    Resize an overlay image to fit within target dimensions while preserving aspect ratio,
+    then center it on a canvas of the target dimensions.
+    
+    Args:
+        overlay (numpy.ndarray): The overlay image to resize
+        target_width (int): The width of the target canvas
+        target_height (int): The height of the target canvas
+        
+    Returns:
+        numpy.ndarray: The resized and centered overlay on a canvas of target dimensions
+    """
+    # Get the original dimensions
+    h, w = overlay.shape[:2]
+    
+    # Calculate the aspect ratios
+    aspect_src = w / h
+    aspect_target = target_width / target_height
+    
+    # Determine the resize dimensions to maintain aspect ratio
+    if aspect_src > aspect_target:
+        # Image is wider than target, scale by width
+        new_width = target_width
+        new_height = int(new_width / aspect_src)
+    else:
+        # Image is taller than target, scale by height
+        new_height = target_height
+        new_width = int(new_height * aspect_src)
+    
+    # Resize the image while preserving aspect ratio
+    resized_overlay = cv2.resize(overlay, (new_width, new_height))
+    
+    # Create a blank canvas with target dimensions
+    if overlay.shape[2] == 4:  # With alpha channel
+        canvas = np.zeros((target_height, target_width, 4), dtype=np.uint8)
+    else:
+        canvas = np.zeros((target_height, target_width, 3), dtype=np.uint8)
+    
+    # Calculate position to center the resized image on the canvas
+    y_offset = (target_height - new_height) // 2
+    x_offset = (target_width - new_width) // 2
+    
+    # Place the resized image on the canvas
+    canvas[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = resized_overlay
+    
+    return canvas
+
 def load_config(config_path):
     """Load and validate the configuration file."""
     try:
@@ -194,8 +242,8 @@ def process_video(config, verbose=False):
             
             # Add overlay if available
             if overlay is not None:
-                # Resize overlay to match output dimensions
-                overlay_resized = cv2.resize(overlay, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
+                # Resize overlay to match output dimensions while preserving aspect ratio
+                overlay_resized = resize_and_center_overlay(overlay, OUTPUT_WIDTH, OUTPUT_HEIGHT)
                 
                 # Apply alpha blending for transparent overlay
                 if overlay_resized.shape[2] == 4:  # With alpha channel
