@@ -23,7 +23,7 @@ Instead of cropping out important parts of your video or having ugly black bars 
 ### Step 1: Clone this AMAZING repository 🤩
 
 ```bash
-git clone https://github.com/yourusername/video-panner-3000.git
+git clone https://github.com/MushroomFleet/Pan-Vertical-CLI
 cd video-panner-3000
 ```
 
