@@ -6,6 +6,8 @@ This script transforms 1280x720 landscape videos into 720x1280 portrait videos
 with a configurable panning effect that moves from left to right through
 user-defined markpoints.
 
+This version supports CUDA-acceleration for improved processing speed.
+
 Usage:
     python video_panner.py --config path/to/config.json
 """
@@ -21,6 +23,21 @@ import cv2
 import numpy as np
 import ffmpeg
 
+# Import CUDA-specific modules
+try:
+    import cupy as cp
+    from cv2 import cuda
+    CUDA_AVAILABLE = cuda.getCudaEnabledDeviceCount() > 0
+    if CUDA_AVAILABLE:
+        print(f"CUDA is available. Found {cuda.getCudaEnabledDeviceCount()} CUDA device(s).")
+        device_info = cuda.getDevice()
+        print(f"Using CUDA device: {device_info}")
+    else:
+        print("No CUDA-enabled devices found. Falling back to CPU processing.")
+except ImportError:
+    CUDA_AVAILABLE = False
+    print("CUDA modules not available. Falling back to CPU processing.")
+
 # Constants
 DEFAULT_MARKPOINT1 = 5.0   # 5% into video duration, left align
 DEFAULT_MARKPOINT2 = 50.0  # 50% into video duration, center align
@@ -29,6 +46,38 @@ EXPECTED_WIDTH = 1280
 EXPECTED_HEIGHT = 720
 OUTPUT_WIDTH = 720
 OUTPUT_HEIGHT = 1280
+
+# GPU helper functions
+def to_gpu(img):
+    """Transfer an image to the GPU"""
+    if CUDA_AVAILABLE:
+        return cuda.GpuMat(img)
+    return img
+
+def to_cpu(gpu_mat):
+    """Transfer an image from the GPU to the CPU"""
+    if CUDA_AVAILABLE and isinstance(gpu_mat, cuda.GpuMat):
+        return gpu_mat.download()
+    return gpu_mat
+
+def gpu_resize(img, size):
+    """Resize an image using GPU acceleration if available"""
+    if CUDA_AVAILABLE:
+        if not isinstance(img, cuda.GpuMat):
+            img = to_gpu(img)
+        result = cuda.resize(img, size)
+        return result
+    else:
+        return cv2.resize(img, size)
+        
+def gpu_crop(img, x, y, width, height):
+    """Crop an image using GPU acceleration if available"""
+    if CUDA_AVAILABLE:
+        if not isinstance(img, cuda.GpuMat):
+            img = to_gpu(img)
+        return img[y:y+height, x:x+width]
+    else:
+        return img[y:y+height, x:x+width]
 
 def resize_and_center_overlay(overlay, target_width, target_height):
     """
@@ -60,8 +109,13 @@ def resize_and_center_overlay(overlay, target_width, target_height):
         new_height = target_height
         new_width = int(new_height * aspect_src)
     
-    # Resize the image while preserving aspect ratio
-    resized_overlay = cv2.resize(overlay, (new_width, new_height))
+    # Resize the image while preserving aspect ratio using GPU if available
+    if CUDA_AVAILABLE:
+        gpu_overlay = to_gpu(overlay)
+        gpu_resized = gpu_resize(gpu_overlay, (new_width, new_height))
+        resized_overlay = to_cpu(gpu_resized)
+    else:
+        resized_overlay = cv2.resize(overlay, (new_width, new_height))
     
     # Calculate position to center the resized image on the canvas
     y_offset = (target_height - new_height) // 2
@@ -270,9 +324,21 @@ def process_video(config, verbose=False):
                 cv2.imwrite(source_debug_path, frame)
                 print(f"Saved source frame to {source_debug_path}")
             
-            # Crop the frame to get the 720 wide section - use direct slicing for efficiency
+            # Crop the frame to get the 720 wide section - use GPU if available
             try:
-                cropped_frame = frame[:, x_offset:x_offset+OUTPUT_WIDTH, :]
+                if CUDA_AVAILABLE:
+                    # Transfer frame to GPU
+                    gpu_frame = to_gpu(frame)
+                    
+                    # Crop on GPU
+                    gpu_cropped = gpu_crop(gpu_frame, x_offset, 0, OUTPUT_WIDTH, height)
+                    
+                    # Transfer back to CPU
+                    cropped_frame = to_cpu(gpu_cropped)
+                else:
+                    # CPU fallback
+                    cropped_frame = frame[:, x_offset:x_offset+OUTPUT_WIDTH, :]
+                
                 if verbose and current_frame == 0:
                     print(f"Cropped frame shape: {cropped_frame.shape}")
                 
@@ -291,7 +357,13 @@ def process_video(config, verbose=False):
             
             # Place cropped frame in the middle of the portrait frame vertically
             try:
-                portrait_frame[y_offset:y_offset+height, :, :] = cropped_frame
+                if CUDA_AVAILABLE:
+                    # For complex slicing operations, sometimes CPU operations are still more efficient
+                    # due to memory transfer overheads
+                    portrait_frame[y_offset:y_offset+height, :, :] = cropped_frame
+                else:
+                    portrait_frame[y_offset:y_offset+height, :, :] = cropped_frame
+                
                 if verbose and current_frame == 0:
                     print(f"Portrait frame shape after placement: {portrait_frame.shape}")
                     print(f"y_offset: {y_offset}, height: {height}")
@@ -328,30 +400,82 @@ def process_video(config, verbose=False):
                         # Debug the overlay_area
                         if verbose and current_frame == 0:
                             print(f"Overlay area shape: {overlay_area.shape}")
-                            # Check if overlay area is all zeros (black)
                             print(f"Overlay area max value before blending: {np.max(overlay_area)}")
                         
-                        # Create a copy of the overlay area first (prevents in-place modification issues)
-                        blended_area = overlay_area.copy()
-                        
-                        # Apply overlay using alpha blending formula
-                        alpha_factor = resized_overlay[:,:,3].astype(float) / 255.0
-                        for c in range(3):  # For each color channel
-                            blended_area[:,:,c] = (overlay_area[:,:,c] * (1 - alpha_factor) + 
-                                               resized_overlay[:,:,c] * alpha_factor).astype(np.uint8)
-                        
-                        # Copy the blended result back to the portrait frame
-                        portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w] = blended_area
+                        if CUDA_AVAILABLE:
+                            try:
+                                # GPU-accelerated alpha blending
+                                # Create arrays on GPU
+                                gpu_overlay = cp.asarray(resized_overlay)
+                                gpu_area = cp.asarray(overlay_area)
+                                
+                                # Alpha blending formula on GPU
+                                alpha_factor = gpu_overlay[:,:,3].astype(cp.float32) / 255.0
+                                
+                                # Create the result array on GPU
+                                blended_gpu = cp.zeros_like(gpu_area)
+                                
+                                # Apply blending for each channel
+                                for c in range(3):
+                                    blended_gpu[:,:,c] = (gpu_area[:,:,c] * (1 - alpha_factor) + 
+                                                      gpu_overlay[:,:,c] * alpha_factor).astype(cp.uint8)
+                                
+                                # Transfer back to CPU
+                                blended_area = cp.asnumpy(blended_gpu)
+                                
+                                # Copy the blended result back to the portrait frame
+                                portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w] = blended_area
+                            except Exception as cuda_e:
+                                # Fallback to CPU if CUDA blending fails
+                                if verbose and current_frame == 0:
+                                    print(f"CUDA blending failed, falling back to CPU: {str(cuda_e)}")
+                                # CPU fallback implementation
+                                blended_area = overlay_area.copy()
+                                alpha_factor = resized_overlay[:,:,3].astype(float) / 255.0
+                                for c in range(3):
+                                    blended_area[:,:,c] = (overlay_area[:,:,c] * (1 - alpha_factor) + 
+                                                       resized_overlay[:,:,c] * alpha_factor).astype(np.uint8)
+                                portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w] = blended_area
+                        else:
+                            # CPU implementation
+                            blended_area = overlay_area.copy()
+                            alpha_factor = resized_overlay[:,:,3].astype(float) / 255.0
+                            for c in range(3):
+                                blended_area[:,:,c] = (overlay_area[:,:,c] * (1 - alpha_factor) + 
+                                                   resized_overlay[:,:,c] * alpha_factor).astype(np.uint8)
+                            portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w] = blended_area
                         
                         if verbose and current_frame == 0:
                             print(f"Overlay area max value after blending: {np.max(portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w])}")
                     else:
-                        # Just use OpenCV's addWeighted for non-transparent overlays
-                        cv2.addWeighted(
-                            portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w], 0.7,  # Reduce weight of overlay
-                            resized_overlay, 0.3, 0,
-                            dst=portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w]
-                        )
+                        # For non-transparent overlays
+                        if CUDA_AVAILABLE:
+                            try:
+                                # Use CUDA-accelerated addWeighted
+                                gpu_overlay_area = to_gpu(portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w])
+                                gpu_overlay_img = to_gpu(resized_overlay)
+                                
+                                # Perform blending on GPU
+                                gpu_result = cuda.addWeighted(gpu_overlay_area, 0.7, gpu_overlay_img, 0.3, 0.0)
+                                
+                                # Transfer result back to CPU and place in the portrait frame
+                                portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w] = to_cpu(gpu_result)
+                            except Exception as cuda_e:
+                                if verbose and current_frame == 0:
+                                    print(f"CUDA addWeighted failed, falling back to CPU: {str(cuda_e)}")
+                                # Fallback to CPU
+                                cv2.addWeighted(
+                                    portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w], 0.7,
+                                    resized_overlay, 0.3, 0,
+                                    dst=portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w]
+                                )
+                        else:
+                            # CPU version
+                            cv2.addWeighted(
+                                portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w], 0.7,
+                                resized_overlay, 0.3, 0,
+                                dst=portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w]
+                            )
                 except Exception as e:
                     print(f"Error applying overlay: {str(e)}")
                     print(f"Portrait frame shape: {portrait_frame.shape}")
