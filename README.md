@@ -72,6 +72,8 @@ sudo apt update && sudo apt install ffmpeg
 
 ### Step 3: Set up CUDA Environment Variables ⚙️🔧
 
+The script requires the `CUDA_PATH` environment variable to be set. There are multiple ways to do this:
+
 For Windows:
 ```powershell
 # Find your CUDA installation path
@@ -83,7 +85,9 @@ For Linux/macOS:
 export CUDA_PATH=/usr/local/cuda-11.8  # Update version as needed
 ```
 
-You can also set this permanently in your system environment variables.
+You can also set this permanently in your system environment variables or modify your virtual environment activation scripts.
+
+> 📌 **For detailed instructions on all CUDA_PATH setup methods, see our [CUDA Setup Guide](CUDA_PATH.md)** 📌
 
 ### CUDA Requirements 🖥️🚀
 
@@ -93,12 +97,13 @@ For CUDA acceleration, you'll need:
 - NVIDIA drivers installed (version 418.xx or later)
 - CUDA Toolkit (version 11.x or 12.x is recommended)
 - CuPy package that matches your CUDA version (cupy-cuda11x for CUDA 11.x)
+- Properly set `CUDA_PATH` environment variable ([see our setup guide](CUDA_PATH.md))
 
 The tool uses two acceleration methods:
 1. **CuPy** (primary) - Provides fast GPU versions of NumPy operations
 2. **OpenCV CUDA** (secondary) - Falls back to OpenCV's CUDA functions if available
 
-If no GPU is found or there are any issues with CUDA, the tool will safely fall back to CPU processing.
+Our code is designed to handle most CUDA configuration internally once `CUDA_PATH` is set. If no GPU is found or there are any issues with CUDA, the tool will safely fall back to CPU processing.
 
 ## 🚀 How to Use It 🚀
 

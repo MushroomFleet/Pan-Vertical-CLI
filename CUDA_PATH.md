@@ -2,6 +2,17 @@
 
 Setting up the `CUDA_PATH` environment variable is **critical** for enabling GPU acceleration in Video Panner. This variable helps the application find your CUDA installation and properly utilize your NVIDIA GPU.
 
+## How Our Implementation Works
+
+Our video processing script now has two layers of CUDA acceleration handling:
+
+1. **Environment Variable Setup**: You need to set `CUDA_PATH` using one of the methods described below.
+2. **Automatic Configuration**: The script automatically configures additional CUDA environment variables internally based on `CUDA_PATH`.
+
+This means you only need to set `CUDA_PATH` by any method you prefer, and the script will handle the rest of the configuration.
+
+> **Important Note**: While we initially modified the virtual environment activation scripts to get CUDA working, this is now just one of several optional ways to set `CUDA_PATH`. Choose the method below that works best for your workflow.
+
 ## For Windows:
 
 ### Using PowerShell (Recommended)
