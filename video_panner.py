@@ -19,6 +19,25 @@ import argparse
 import time
 import subprocess
 from datetime import datetime
+
+# Set CUDA environment variables before importing OpenCV
+cuda_path = os.environ.get('CUDA_PATH')
+if cuda_path:
+    # Set OpenCV-specific CUDA environment variables
+    os.environ['OPENCV_CUDA_PATH'] = cuda_path
+    os.environ['CUDA_HOME'] = cuda_path
+    os.environ['OPENCV_CUDA_TOOLKIT_ROOT_DIR'] = cuda_path
+    
+    # Set paths for various CUDA libraries
+    os.environ['OPENCV_CUDA_LIB_PATH'] = os.path.join(cuda_path, 'lib/x64')
+    os.environ['OPENCV_CUDA_BIN_PATH'] = os.path.join(cuda_path, 'bin')
+    os.environ['OPENCV_CUDA_INCLUDE_PATH'] = os.path.join(cuda_path, 'include')
+    
+    # Add CUDA bin directory to PATH
+    if sys.platform == 'win32':
+        cuda_bin_path = os.path.join(cuda_path, 'bin')
+        os.environ['PATH'] = cuda_bin_path + os.pathsep + os.environ.get('PATH', '')
+
 import cv2
 import numpy as np
 import ffmpeg
@@ -26,17 +45,58 @@ import ffmpeg
 # Import CUDA-specific modules
 try:
     import cupy as cp
-    from cv2 import cuda
-    CUDA_AVAILABLE = cuda.getCudaEnabledDeviceCount() > 0
+    import cupyx.scipy.ndimage
+    from cv2 import cuda  # Still try to import for compatibility
+    
+    # Debug CUDA environment
+    print(f"CUDA_PATH: {os.environ.get('CUDA_PATH')}")
+    print(f"OPENCV_CUDA_PATH: {os.environ.get('OPENCV_CUDA_PATH')}")
+    print(f"CUDA_HOME: {os.environ.get('CUDA_HOME')}")
+    
+    # Check CuPy CUDA support (this is what we'll primarily use)
+    cupy_cuda_available = cp.cuda.is_available()
+    print(f"CuPy CUDA available: {cupy_cuda_available}")
+    if cupy_cuda_available:
+        print(f"CuPy CUDA runtime version: {cp.cuda.runtime.runtimeGetVersion()}")
+        print(f"CuPy CUDA device count: {cp.cuda.runtime.getDeviceCount()}")
+        device_props = cp.cuda.runtime.getDeviceProperties(0)
+        print(f"CuPy CUDA device name: {device_props['name'].decode('utf-8')}")
+        print(f"CuPy CUDA device memory: {device_props['totalGlobalMem'] / (1024**3):.2f} GB")
+    
+    # Also check OpenCV CUDA support as a fallback
+    have_opencv_cuda = hasattr(cv2, 'cuda') and hasattr(cv2.cuda, 'getCudaEnabledDeviceCount')
+    print(f"OpenCV has CUDA module: {have_opencv_cuda}")
+    
+    opencv_cuda_available = False
+    if have_opencv_cuda:
+        device_count = cuda.getCudaEnabledDeviceCount()
+        opencv_cuda_available = device_count > 0
+        print(f"OpenCV CUDA device count: {device_count}")
+        
+        if opencv_cuda_available:
+            print(f"OpenCV CUDA is available. Found {device_count} CUDA device(s).")
+            device_info = cuda.getDevice()
+            print(f"Using OpenCV CUDA device: {device_info}")
+            
+            # Try to get more device info
+            try:
+                device_name = cuda.getDeviceName(device_info)
+                print(f"OpenCV CUDA device name: {device_name}")
+            except Exception as e:
+                print(f"Could not get OpenCV CUDA device name: {str(e)}")
+    
+    # Use CUDA if either CuPy or OpenCV can use it, but prefer CuPy
+    CUDA_AVAILABLE = cupy_cuda_available
     if CUDA_AVAILABLE:
-        print(f"CUDA is available. Found {cuda.getCudaEnabledDeviceCount()} CUDA device(s).")
-        device_info = cuda.getDevice()
-        print(f"Using CUDA device: {device_info}")
+        print("CUDA acceleration enabled via CuPy!")
+    elif opencv_cuda_available:
+        print("CUDA acceleration enabled via OpenCV!")
+        CUDA_AVAILABLE = True
     else:
         print("No CUDA-enabled devices found. Falling back to CPU processing.")
-except ImportError:
+except ImportError as e:
     CUDA_AVAILABLE = False
-    print("CUDA modules not available. Falling back to CPU processing.")
+    print(f"CUDA modules not available: {str(e)}. Falling back to CPU processing.")
 
 # Constants
 DEFAULT_MARKPOINT1 = 5.0   # 5% into video duration, left align
@@ -47,37 +107,112 @@ EXPECTED_HEIGHT = 720
 OUTPUT_WIDTH = 720
 OUTPUT_HEIGHT = 1280
 
-# GPU helper functions
+# GPU helper functions using CuPy and OpenCV for fallback
 def to_gpu(img):
-    """Transfer an image to the GPU"""
-    if CUDA_AVAILABLE:
-        return cuda.GpuMat(img)
+    """Transfer an image to the GPU using CuPy or OpenCV"""
+    if not CUDA_AVAILABLE:
+        return img
+    
+    try:
+        # Try CuPy first
+        if cupy_cuda_available:
+            return cp.asarray(img)
+        # Fallback to OpenCV CUDA if available
+        elif opencv_cuda_available:
+            return cuda.GpuMat(img)
+    except Exception as e:
+        print(f"GPU transfer failed: {str(e)}. Using CPU fallback.")
+    
     return img
 
 def to_cpu(gpu_mat):
     """Transfer an image from the GPU to the CPU"""
-    if CUDA_AVAILABLE and isinstance(gpu_mat, cuda.GpuMat):
-        return gpu_mat.download()
+    if not CUDA_AVAILABLE:
+        return gpu_mat
+    
+    try:
+        # Check for CuPy array
+        if cupy_cuda_available and isinstance(gpu_mat, cp.ndarray):
+            return cp.asnumpy(gpu_mat)
+        # Check for OpenCV CUDA GpuMat
+        elif opencv_cuda_available and isinstance(gpu_mat, cuda.GpuMat):
+            return gpu_mat.download()
+    except Exception as e:
+        print(f"CPU transfer failed: {str(e)}. Using as-is.")
+    
     return gpu_mat
 
 def gpu_resize(img, size):
     """Resize an image using GPU acceleration if available"""
-    if CUDA_AVAILABLE:
-        if not isinstance(img, cuda.GpuMat):
-            img = to_gpu(img)
-        result = cuda.resize(img, size)
-        return result
-    else:
+    if not CUDA_AVAILABLE:
         return cv2.resize(img, size)
+    
+    try:
+        # CuPy resize using scipy.ndimage
+        if cupy_cuda_available:
+            # Convert OpenCV size format (width, height) to numpy/cupy format (height, width)
+            target_height, target_width = size[1], size[0]
+            
+            # Transfer to GPU if not already there
+            if not isinstance(img, cp.ndarray):
+                gpu_img = cp.asarray(img)
+            else:
+                gpu_img = img
+            
+            # Calculate scale factors
+            h_scale = target_height / gpu_img.shape[0]
+            w_scale = target_width / gpu_img.shape[1]
+            
+            # Perform the resize for each channel separately
+            channels = []
+            for c in range(gpu_img.shape[2]):
+                channel = cupyx.scipy.ndimage.zoom(gpu_img[:,:,c], (h_scale, w_scale), order=1)
+                channels.append(channel)
+            
+            # Stack channels back together
+            resized = cp.stack(channels, axis=2)
+            return resized
+        
+        # OpenCV CUDA resize fallback
+        elif opencv_cuda_available:
+            if not isinstance(img, cuda.GpuMat):
+                gpu_img = cuda.GpuMat(img)
+            else:
+                gpu_img = img
+            result = cuda.resize(gpu_img, size)
+            return result
+    except Exception as e:
+        print(f"GPU resize failed: {str(e)}. Using CPU fallback.")
+    
+    # CPU fallback
+    return cv2.resize(img, size)
         
 def gpu_crop(img, x, y, width, height):
     """Crop an image using GPU acceleration if available"""
-    if CUDA_AVAILABLE:
-        if not isinstance(img, cuda.GpuMat):
-            img = to_gpu(img)
-        return img[y:y+height, x:x+width]
-    else:
-        return img[y:y+height, x:x+width]
+    if not CUDA_AVAILABLE:
+        return img[y:y+height, x:x+width, :]
+    
+    try:
+        # CuPy crop
+        if cupy_cuda_available:
+            if not isinstance(img, cp.ndarray):
+                gpu_img = cp.asarray(img)
+            else:
+                gpu_img = img
+            return gpu_img[y:y+height, x:x+width, :]
+        
+        # OpenCV CUDA crop fallback
+        elif opencv_cuda_available:
+            if not isinstance(img, cuda.GpuMat):
+                gpu_img = cuda.GpuMat(img)
+            else:
+                gpu_img = img
+            return gpu_img[y:y+height, x:x+width]
+    except Exception as e:
+        print(f"GPU crop failed: {str(e)}. Using CPU fallback.")
+    
+    # CPU fallback
+    return img[y:y+height, x:x+width, :]
 
 def resize_and_center_overlay(overlay, target_width, target_height):
     """
