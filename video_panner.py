@@ -124,17 +124,27 @@ def ensure_templates_directory():
 
 def process_video(config, verbose=False):
     """Process a single video to apply panning effect."""
-    source_path = config['source']
-    output_path = config['output']
+    source_path = os.path.normpath(config['source'])
+    output_path = os.path.normpath(config['output'])
     markpoint1 = float(config['markpoint1']) / 100.0  # Convert percentage to decimal
     markpoint2 = float(config['markpoint2']) / 100.0
     markpoint3 = float(config['markpoint3']) / 100.0
     
+    if verbose:
+        print(f"Normalized paths: source={source_path}, output={output_path}")
+        print(f"Processing with markpoints: {markpoint1*100}%, {markpoint2*100}%, {markpoint3*100}%")
+    
     try:
+        # Check if source file exists
+        if not os.path.isfile(source_path):
+            print(f"Error: Source file not found at {source_path}")
+            return None
+            
         # Open the source video
         cap = cv2.VideoCapture(source_path)
         if not cap.isOpened():
             print(f"Error: Could not open video file at {source_path}")
+            print(f"Ensure the path is correct and the video file is valid.")
             return None
         
         # Get video properties
@@ -238,38 +248,121 @@ def process_video(config, verbose=False):
             # Get pre-calculated x_offset for current frame
             x_offset = x_offsets[current_frame]
             
+            # Add debugging to check source frame shape before cropping
+            if verbose and current_frame == 0:
+                print(f"Source frame shape: {frame.shape}")
+                print(f"x_offset: {x_offset}, OUTPUT_WIDTH: {OUTPUT_WIDTH}")
+                print(f"Calculated crop region: x_offset={x_offset} to {x_offset+OUTPUT_WIDTH}")
+            
+            # Ensure x_offset + OUTPUT_WIDTH doesn't exceed the frame width
+            if x_offset + OUTPUT_WIDTH > width:
+                if verbose:
+                    print(f"Warning: Crop region exceeds frame width. Adjusting x_offset from {x_offset} to {width - OUTPUT_WIDTH}")
+                x_offset = width - OUTPUT_WIDTH
+            
+            # Save the first frame for debugging if requested
+            if current_frame == 0 and '--check-first-frame' in sys.argv:
+                debug_dir = os.path.join(output_path, "debug")
+                os.makedirs(debug_dir, exist_ok=True)
+                
+                # Save the source frame
+                source_debug_path = os.path.join(debug_dir, f"{name}_source_frame.jpg")
+                cv2.imwrite(source_debug_path, frame)
+                print(f"Saved source frame to {source_debug_path}")
+            
             # Crop the frame to get the 720 wide section - use direct slicing for efficiency
-            cropped_frame = frame[:, x_offset:x_offset+OUTPUT_WIDTH, :]
+            try:
+                cropped_frame = frame[:, x_offset:x_offset+OUTPUT_WIDTH, :]
+                if verbose and current_frame == 0:
+                    print(f"Cropped frame shape: {cropped_frame.shape}")
+                
+                # Save the cropped frame for debugging if requested
+                if current_frame == 0 and '--check-first-frame' in sys.argv:
+                    cropped_debug_path = os.path.join(debug_dir, f"{name}_cropped_frame.jpg")
+                    cv2.imwrite(cropped_debug_path, cropped_frame)
+                    print(f"Saved cropped frame to {cropped_debug_path}")
+            except Exception as e:
+                print(f"Error during frame cropping: {str(e)}")
+                print(f"Frame shape: {frame.shape}, x_offset: {x_offset}, OUTPUT_WIDTH: {OUTPUT_WIDTH}")
+                raise
             
             # Clear the portrait frame for reuse (more efficient than creating a new array)
             portrait_frame.fill(0)
             
             # Place cropped frame in the middle of the portrait frame vertically
-            portrait_frame[y_offset:y_offset+height, :, :] = cropped_frame
+            try:
+                portrait_frame[y_offset:y_offset+height, :, :] = cropped_frame
+                if verbose and current_frame == 0:
+                    print(f"Portrait frame shape after placement: {portrait_frame.shape}")
+                    print(f"y_offset: {y_offset}, height: {height}")
+            except Exception as e:
+                print(f"Error during frame placement: {str(e)}")
+                print(f"Portrait frame shape: {portrait_frame.shape}, y_offset: {y_offset}, height: {height}")
+                print(f"Cropped frame shape: {cropped_frame.shape}")
+                raise
             
             # Add overlay if available - use pre-processed data
             if overlay_data is not None:
                 resized_overlay, placements = overlay_data
                 y_pos, x_pos, h, w = placements
                 
-                # Simple direct overlay with alpha if present
-                if resized_overlay.shape[2] == 4:  # With alpha channel
-                    # Get the overlay area in the portrait frame
-                    overlay_area = portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w]
+                if verbose and current_frame == 0:
+                    print(f"Overlay shape: {resized_overlay.shape}")
+                    print(f"Overlay placement: y_pos={y_pos}, x_pos={x_pos}, h={h}, w={w}")
+                
+                # Verify overlay bounds are within the portrait frame
+                if y_pos < 0 or x_pos < 0 or y_pos + h > OUTPUT_HEIGHT or x_pos + w > OUTPUT_WIDTH:
+                    if verbose and current_frame == 0:
+                        print("Warning: Overlay placement exceeds portrait frame bounds, adjusting...")
                     
-                    # Apply overlay using a simpler method - much faster than complex NumPy operations
-                    for c in range(3):  # For each color channel
-                        overlay_area[:,:,c] = (
-                            overlay_area[:,:,c] * (255 - resized_overlay[:,:,3]) + 
-                            resized_overlay[:,:,c] * resized_overlay[:,:,3]
-                        ) // 255
-                else:
-                    # Just use OpenCV's addWeighted for non-transparent overlays
-                    cv2.addWeighted(
-                        portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w], 1,
-                        resized_overlay, 0.3, 0,
-                        dst=portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w]
-                    )
+                    # Adjust placement to ensure it's within bounds
+                    y_pos = max(0, min(y_pos, OUTPUT_HEIGHT - h))
+                    x_pos = max(0, min(x_pos, OUTPUT_WIDTH - w))
+                
+                try:
+                    # Simple direct overlay with alpha if present
+                    if resized_overlay.shape[2] == 4:  # With alpha channel
+                        # Get the overlay area in the portrait frame
+                        overlay_area = portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w]
+                        
+                        # Debug the overlay_area
+                        if verbose and current_frame == 0:
+                            print(f"Overlay area shape: {overlay_area.shape}")
+                            # Check if overlay area is all zeros (black)
+                            print(f"Overlay area max value before blending: {np.max(overlay_area)}")
+                        
+                        # Create a copy of the overlay area first (prevents in-place modification issues)
+                        blended_area = overlay_area.copy()
+                        
+                        # Apply overlay using alpha blending formula
+                        alpha_factor = resized_overlay[:,:,3].astype(float) / 255.0
+                        for c in range(3):  # For each color channel
+                            blended_area[:,:,c] = (overlay_area[:,:,c] * (1 - alpha_factor) + 
+                                               resized_overlay[:,:,c] * alpha_factor).astype(np.uint8)
+                        
+                        # Copy the blended result back to the portrait frame
+                        portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w] = blended_area
+                        
+                        if verbose and current_frame == 0:
+                            print(f"Overlay area max value after blending: {np.max(portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w])}")
+                    else:
+                        # Just use OpenCV's addWeighted for non-transparent overlays
+                        cv2.addWeighted(
+                            portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w], 0.7,  # Reduce weight of overlay
+                            resized_overlay, 0.3, 0,
+                            dst=portrait_frame[y_pos:y_pos+h, x_pos:x_pos+w]
+                        )
+                except Exception as e:
+                    print(f"Error applying overlay: {str(e)}")
+                    print(f"Portrait frame shape: {portrait_frame.shape}")
+                    print(f"Overlay dimensions: {resized_overlay.shape}")
+                    print(f"Placement coordinates: y_pos={y_pos}, x_pos={x_pos}, h={h}, w={w}")
+            
+            # Save the final portrait frame (with overlay) for debugging if requested
+            if current_frame == 0 and '--check-first-frame' in sys.argv:
+                portrait_debug_path = os.path.join(debug_dir, f"{name}_portrait_frame.jpg")
+                cv2.imwrite(portrait_debug_path, portrait_frame)
+                print(f"Saved portrait frame to {portrait_debug_path}")
             
             # Write the frame to output video
             out.write(portrait_frame)
@@ -394,6 +487,12 @@ def process_batch(config, verbose=False):
     """Process a batch of videos based on the config."""
     source_path = config['source']
     
+    # Normalize file paths (handle Windows backslashes)
+    source_path = os.path.normpath(source_path)
+    
+    if verbose:
+        print(f"Normalized source path: {source_path}")
+    
     # Check if source is a directory
     if os.path.isdir(source_path):
         # Process all video files in the directory
@@ -402,10 +501,14 @@ def process_batch(config, verbose=False):
         
         # Get list of video files more efficiently
         video_files = []
-        for f in os.listdir(source_path):
-            file_path = os.path.join(source_path, f)
-            if os.path.isfile(file_path) and os.path.splitext(f)[1].lower() in video_extensions:
-                video_files.append(f)
+        try:
+            for f in os.listdir(source_path):
+                file_path = os.path.join(source_path, f)
+                if os.path.isfile(file_path) and os.path.splitext(f)[1].lower() in video_extensions:
+                    video_files.append(f)
+        except Exception as e:
+            print(f"Error listing directory {source_path}: {str(e)}")
+            return []
         
         if not video_files:
             print(f"No video files found in {source_path}")
@@ -442,6 +545,7 @@ def main():
         parser = argparse.ArgumentParser(description='Video panning effect processor')
         parser.add_argument('--config', required=True, help='Path to configuration JSON file')
         parser.add_argument('--verbose', action='store_true', help='Show detailed progress information')
+        parser.add_argument('--check-first-frame', action='store_true', help='Save the first frame as an image for debugging')
         args = parser.parse_args()
         
         if not os.path.exists(args.config):
@@ -454,7 +558,40 @@ def main():
         # Load the configuration
         config = load_config(args.config)
         
+        # Normalize paths in config
+        if 'source' in config:
+            config['source'] = os.path.normpath(config['source'])
+        if 'output' in config:
+            config['output'] = os.path.normpath(config['output'])
+        
+        # Debug info for overlay
+        if args.verbose and 'overlay' in config and config['overlay'] != 'none':
+            template_path = os.path.join('templates', config['overlay'])
+            if os.path.exists(template_path):
+                # Test read the overlay to check if it's valid
+                try:
+                    test_overlay = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
+                    if test_overlay is not None:
+                        print(f"Overlay image found and readable: {template_path}")
+                        print(f"Overlay dimensions: {test_overlay.shape}")
+                        print(f"Overlay channels: {test_overlay.shape[2] if len(test_overlay.shape) > 2 else 1}")
+                        
+                        # Save a copy of the overlay to the output directory for verification
+                        test_output_dir = os.path.normpath(config['output'])
+                        os.makedirs(test_output_dir, exist_ok=True)
+                        overlay_output = os.path.join(test_output_dir, f"overlay_debug_{config['overlay']}")
+                        cv2.imwrite(overlay_output, test_overlay)
+                        print(f"Saved debug copy of overlay to {overlay_output}")
+                    else:
+                        print(f"WARNING: Overlay image could not be read: {template_path}")
+                except Exception as e:
+                    print(f"ERROR reading overlay image: {str(e)}")
+            else:
+                print(f"WARNING: Overlay image not found: {template_path}")
+        
         print(f"Starting video processing with configuration from {args.config}")
+        print(f"Source: {config['source']}")
+        print(f"Output: {config['output']}")
         
         start_time = time.time()
         
