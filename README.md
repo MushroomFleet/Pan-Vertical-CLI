@@ -1,6 +1,7 @@
 # 🎬✨ VIDEO PANNER 3000 ✨🎬
 
 > _Transform your boring landscape videos into **EPIC** portrait masterpieces!_ 🔄🔥🔥🔥
+> _NOW MORE THAN TWO TIME FASTER_ 🔥🔥
 
 ## 🤔 What is this madness?! 🤯
 
