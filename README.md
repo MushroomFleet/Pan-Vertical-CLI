@@ -48,13 +48,17 @@ venv\Scripts\activate
 # For macOS/Linux 🐧
 source venv/bin/activate
 
-# Install the dependencies 🔽
+# Install all dependencies (with CUDA support) 🔽
 pip install -r requirements.txt
-# or install manually (without CUDA):
+
+# Or install manually with components you need:
+# Basic version (without CUDA):
 pip install opencv-python numpy ffmpeg-python
 
 # For CUDA acceleration (NVIDIA GPUs only 🖥️):
-pip install opencv-contrib-python cupy-cuda11x
+pip install opencv-contrib-python cupy-cuda11x  # For CUDA 11.x
+# Or if you have CUDA 12.x:
+pip install opencv-contrib-python cupy-cuda12x
 
 # Install FFmpeg (system dependency) 🎬
 # For Windows:
@@ -66,15 +70,35 @@ brew install ffmpeg
 sudo apt update && sudo apt install ffmpeg
 ```
 
+### Step 3: Set up CUDA Environment Variables ⚙️🔧
+
+For Windows:
+```powershell
+# Find your CUDA installation path
+$env:CUDA_PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8"  # Update version as needed
+```
+
+For Linux/macOS:
+```bash
+export CUDA_PATH=/usr/local/cuda-11.8  # Update version as needed
+```
+
+You can also set this permanently in your system environment variables.
+
 ### CUDA Requirements 🖥️🚀
 
 For CUDA acceleration, you'll need:
 
 - NVIDIA GPU with compute capability 3.0 or higher
 - NVIDIA drivers installed (version 418.xx or later)
-- CUDA Toolkit (10.0 or later is recommended)
+- CUDA Toolkit (version 11.x or 12.x is recommended)
+- CuPy package that matches your CUDA version (cupy-cuda11x for CUDA 11.x)
 
-The tool will automatically detect your CUDA-enabled GPU and use it if available. If no GPU is found or there are any issues with CUDA, the tool will safely fall back to CPU processing.
+The tool uses two acceleration methods:
+1. **CuPy** (primary) - Provides fast GPU versions of NumPy operations
+2. **OpenCV CUDA** (secondary) - Falls back to OpenCV's CUDA functions if available
+
+If no GPU is found or there are any issues with CUDA, the tool will safely fall back to CPU processing.
 
 ## 🚀 How to Use It 🚀
 
@@ -271,16 +295,37 @@ Process ALL your product demos with your corporate branding! 📈
 
 - Make sure you have an NVIDIA GPU installed in your system
 - Install or update NVIDIA drivers to the latest version
-- Install CUDA Toolkit (version 10.0 or later recommended)
+- Install CUDA Toolkit (version 11.x or 12.x recommended)
+- Set the `CUDA_PATH` environment variable to your CUDA installation path
 - Verify the correct cupy version is installed (matches your CUDA version)
 - Run `nvidia-smi` in terminal to check if your GPU is detected
+
+#### "OpenCV CUDA device count: 0" (but CuPy CUDA works)
+
+This is normal! The pip version of OpenCV often has CUDA interfaces but can't detect CUDA devices properly. Our tool is designed to use CuPy for acceleration instead, which works more reliably.
+
+To verify CUDA is working:
+1. Run with `--verbose` flag and look for:
+   - "CuPy CUDA available: True"
+   - "CUDA acceleration enabled via CuPy!"
+2. You should see GPU device name and memory information
+3. Processing speed should be faster than CPU-only mode
 
 #### "Error during frame cropping" / "CUDA error"
 
 - Your GPU might be running out of memory - try processing a shorter video
 - Close other GPU-intensive applications while running Video Panner
 - Try reducing batch size by processing videos one at a time
+- Make sure your system isn't switching to integrated graphics
+- Check if your CUDA version matches the cupy package version
 - As a last resort, disable CUDA by manually downgrading to `opencv-python` instead of `opencv-contrib-python`
+
+#### "GPU transfer failed / GPU crop failed / GPU resize failed"
+
+- These are specific operations that can fail while others succeed
+- The tool will automatically fall back to CPU for these specific operations
+- No action needed unless you're concerned about performance
+- If these happen frequently, try updating your GPU drivers
 
 ## 🤝 Contributing 🤝
 

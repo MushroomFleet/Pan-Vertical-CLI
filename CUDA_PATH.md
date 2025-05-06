@@ -1,39 +1,61 @@
-# Setting CUDA_PATH in a Virtual Environment
+# Setting CUDA_PATH for Video Panner GPU Acceleration
 
-Here's a step-by-step guide to set up the CUDA_PATH environment variable while using a Python virtual environment:
+Setting up the `CUDA_PATH` environment variable is **critical** for enabling GPU acceleration in Video Panner. This variable helps the application find your CUDA installation and properly utilize your NVIDIA GPU.
 
 ## For Windows:
 
+### Using PowerShell (Recommended)
+
 1. **Install CUDA Toolkit** first if you haven't already. Download from the [NVIDIA website](https://developer.nvidia.com/cuda-downloads).
+   - We've successfully tested with CUDA 11.8, but other versions should work too
 
 2. **Find your CUDA installation path**. It's typically something like:
    ```
-   C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x
+   C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8
    ```
-   (where 12.x is your CUDA version)
+   (update version as needed)
 
-3. **Create environment variable files** in your virtual environment:
+3. **Set the environment variable** in PowerShell:
+   ```powershell
+   $env:CUDA_PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8"
+   ```
+
+4. **Verify the setup**:
+   ```powershell
+   $env:CUDA_PATH
+   ```
+   
+5. **Make it permanent** (optional):
+   - Go to Windows Settings > System > About > Advanced system settings
+   - Click "Environment Variables"
+   - Add a new System variable with name "CUDA_PATH" and the path to your CUDA installation
+
+### Using Virtual Environment (activate.bat)
+
+If you're using a virtual environment with batch file activation:
+
+1. **Edit your virtual environment's activation script**:
    - Navigate to your virtual environment's directory
-   - For activation, create/edit `venv\Scripts\activate.bat` to include:
+   - Edit `venv\Scripts\activate.bat` to include:
    ```bat
    @echo off
-   set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x"
+   set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8"
    set "PATH=%CUDA_PATH%\bin;%PATH%"
    ```
 
-4. **For deactivation** (optional), edit `venv\Scripts\deactivate.bat`:
+2. **For deactivation** (optional), edit `venv\Scripts\deactivate.bat`:
    ```bat
    @echo off
    set CUDA_PATH=
    ```
 
-5. **Reactivate your virtual environment**:
+3. **Reactivate your virtual environment**:
    ```
    deactivate
    venv\Scripts\activate
    ```
 
-6. **Verify the setup**:
+4. **Verify the setup**:
    ```
    echo %CUDA_PATH%
    ```
