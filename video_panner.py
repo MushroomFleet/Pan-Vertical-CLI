@@ -56,12 +56,32 @@ try:
     # Check CuPy CUDA support (this is what we'll primarily use)
     cupy_cuda_available = cp.cuda.is_available()
     print(f"CuPy CUDA available: {cupy_cuda_available}")
+    
+    # Initialize advanced features flags
+    USE_ADVANCED_FEATURES = False
+    MAX_RECOMMENDED_BATCH = 1
+    TOTAL_VRAM_GB = 0
+    
     if cupy_cuda_available:
         print(f"CuPy CUDA runtime version: {cp.cuda.runtime.runtimeGetVersion()}")
         print(f"CuPy CUDA device count: {cp.cuda.runtime.getDeviceCount()}")
         device_props = cp.cuda.runtime.getDeviceProperties(0)
         print(f"CuPy CUDA device name: {device_props['name'].decode('utf-8')}")
-        print(f"CuPy CUDA device memory: {device_props['totalGlobalMem'] / (1024**3):.2f} GB")
+        
+        # Get VRAM size and set feature flags based on available memory
+        TOTAL_VRAM_GB = device_props['totalGlobalMem'] / (1024**3)
+        print(f"CuPy CUDA device memory: {TOTAL_VRAM_GB:.2f} GB")
+        
+        if TOTAL_VRAM_GB >= 12.0:
+            USE_ADVANCED_FEATURES = True
+            print(f"High-VRAM GPU detected ({TOTAL_VRAM_GB:.2f} GB). Enabling advanced features!")
+            # Heuristic: Each 1080p frame is about 8MB, allow overhead
+            MAX_RECOMMENDED_BATCH = min(64, int(TOTAL_VRAM_GB * 1.5))
+            print(f"Maximum recommended batch size: {MAX_RECOMMENDED_BATCH}")
+        else:
+            print(f"Standard GPU detected ({TOTAL_VRAM_GB:.2f} GB). Using basic acceleration.")
+            MAX_RECOMMENDED_BATCH = min(8, max(1, int(TOTAL_VRAM_GB / 0.5)))
+            print(f"Maximum recommended batch size: {MAX_RECOMMENDED_BATCH}")
     
     # Also check OpenCV CUDA support as a fallback
     have_opencv_cuda = hasattr(cv2, 'cuda') and hasattr(cv2.cuda, 'getCudaEnabledDeviceCount')
@@ -89,6 +109,17 @@ try:
     CUDA_AVAILABLE = cupy_cuda_available
     if CUDA_AVAILABLE:
         print("CUDA acceleration enabled via CuPy!")
+        
+        # Set up GPU memory pool based on available memory
+        if USE_ADVANCED_FEATURES:
+            # Configure memory pool for large GPU
+            pool = cp.get_default_memory_pool()
+            with cp.cuda.Device(0):
+                total_memory = cp.cuda.Device().mem_info[1]
+                # Default to 70% of available memory, can be overridden in config
+                DEFAULT_MEMORY_ALLOCATION = 0.7
+                pool.set_limit(DEFAULT_MEMORY_ALLOCATION * total_memory)
+                print(f"GPU memory pool limit set to {DEFAULT_MEMORY_ALLOCATION * 100}% of available memory")
     elif opencv_cuda_available:
         print("CUDA acceleration enabled via OpenCV!")
         CUDA_AVAILABLE = True
@@ -96,6 +127,9 @@ try:
         print("No CUDA-enabled devices found. Falling back to CPU processing.")
 except ImportError as e:
     CUDA_AVAILABLE = False
+    USE_ADVANCED_FEATURES = False
+    MAX_RECOMMENDED_BATCH = 1
+    TOTAL_VRAM_GB = 0
     print(f"CUDA modules not available: {str(e)}. Falling back to CPU processing.")
 
 # Constants
@@ -281,6 +315,35 @@ def load_config(config_path):
         if 'overlay' not in config:
             config['overlay'] = 'none'
         
+        # Set default values for new optimization parameters
+        if 'batch_size' not in config:
+            config['batch_size'] = 8  # Default batch size
+        else:
+            # Ensure batch_size is a positive integer
+            try:
+                batch_size = int(config['batch_size'])
+                if batch_size <= 0:
+                    print(f"Warning: Invalid batch_size {batch_size}. Using default value of 8.")
+                    config['batch_size'] = 8
+                else:
+                    config['batch_size'] = batch_size
+            except ValueError:
+                print(f"Warning: Invalid batch_size value. Using default value of 8.")
+                config['batch_size'] = 8
+                
+        if 'gpu_memory_allocation' not in config:
+            config['gpu_memory_allocation'] = 0.7  # Default to 70% of GPU memory
+        else:
+            # Ensure gpu_memory_allocation is a float between 0.1 and 0.95
+            try:
+                gpu_mem = float(config['gpu_memory_allocation'])
+                if gpu_mem < 0.1 or gpu_mem > 0.95:
+                    print(f"Warning: gpu_memory_allocation {gpu_mem} out of range (0.1-0.95). Using default value of 0.7.")
+                    config['gpu_memory_allocation'] = 0.7
+            except ValueError:
+                print(f"Warning: Invalid gpu_memory_allocation value. Using default value of 0.7.")
+                config['gpu_memory_allocation'] = 0.7
+        
         # Validate markpoint values
         try:
             mp1 = float(config['markpoint1'])
@@ -329,6 +392,24 @@ def process_video(config, verbose=False):
             print(f"Error: Source file not found at {source_path}")
             return None
             
+        # Configure memory pool based on user settings
+        if CUDA_AVAILABLE and cupy_cuda_available:
+            # Get user-defined memory allocation or use default
+            memory_allocation = config.get('gpu_memory_allocation', 0.7)
+            
+            # Set the memory pool limit
+            try:
+                pool = cp.get_default_memory_pool()
+                with cp.cuda.Device(0):
+                    total_memory = cp.cuda.Device().mem_info[1]
+                    pool.set_limit(memory_allocation * total_memory)
+                    if verbose:
+                        print(f"GPU memory pool limit set to {memory_allocation*100:.1f}% "
+                              f"({memory_allocation*total_memory/(1024**3):.2f} GB)")
+            except Exception as e:
+                if verbose:
+                    print(f"Could not configure GPU memory pool: {str(e)}")
+        
         # Open the source video
         cap = cv2.VideoCapture(source_path)
         if not cap.isOpened():
@@ -341,6 +422,21 @@ def process_video(config, verbose=False):
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Get batch size from config and adapt to GPU capabilities
+        batch_size = config.get('batch_size', 1)
+        if CUDA_AVAILABLE:
+            # Ensure batch size is reasonable for GPU
+            batch_size = min(batch_size, MAX_RECOMMENDED_BATCH)
+            if verbose:
+                print(f"Using batch size: {batch_size} (requested: {config.get('batch_size', 1)}, "
+                      f"max recommended: {MAX_RECOMMENDED_BATCH})")
+        else:
+            # Fallback to single frame processing on CPU
+            batch_size = 1
+            if verbose and config.get('batch_size', 1) > 1:
+                print(f"CUDA not available, using batch size: {batch_size} "
+                      f"(requested: {config.get('batch_size', 1)})")
         
         if verbose:
             print(f"Video properties: {width}x{height}, {fps} fps, {total_frames} frames")

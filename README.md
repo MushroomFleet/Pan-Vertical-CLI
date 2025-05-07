@@ -15,6 +15,16 @@ The latest version of VIDEO PANNER 3000 includes **BLAZING FAST** 🔥 CUDA acce
 - Image transformations (cropping, resizing)
 - Alpha blending and effects
 
+### 🦸‍♂️ HIGH-VRAM OPTIMIZATIONS FOR 24GB+ GPUs! 🦸‍♀️
+
+If you're running with a high-end NVIDIA GPU (12GB+ VRAM), VIDEO PANNER 3000 will automatically detect it and enable special optimizations:
+- 🚄 **Batch Frame Processing** - Process multiple frames simultaneously (configurable via `batch_size`)
+- 🧠 **Smart Memory Management** - Efficient VRAM allocation (configurable via `gpu_memory_allocation`)
+- 🔥 **Enhanced Alpha Blending** - Special high-quality effects only enabled for high-VRAM GPUs
+- 🏎️ **Parallel Operations** - Keep more data on the GPU for faster processing
+
+With a 24GB VRAM GPU, expect **dramatically faster** processing compared to 4GB cards - perfect for bulk processing those social media videos! ⚡️⚡️⚡️
+
 ### 🌟 INCREDIBLE FEATURES 🌟
 
 - 🎭 Convert ANY landscape video to portrait format with intelligent panning
@@ -32,7 +42,7 @@ The latest version of VIDEO PANNER 3000 includes **BLAZING FAST** 🔥 CUDA acce
 ### Step 1: Clone this AMAZING repository 🤩
 
 ```bash
-git clone https://github.com/MushroomFleet/Pan-Vertical-CLI
+git clone https://github.com/yourusername/video-panner-3000.git
 cd video-panner-3000
 ```
 
@@ -144,6 +154,8 @@ Your `config.json` file is the COMMAND CENTER for your video transformations! �
 | `markpoint2` ⏺️ | When to reach CENTER position (% of video duration) | `50.0` (centered at half-way point) |
 | `markpoint3` ➡️ | When to reach RIGHT position (% of video duration) | `90.0` (right-aligned at 90% of video) |
 | `overlay` 🖼️ | Overlay image filename (place in `/templates/` folder) or "none" | `"mylogo.png"` or `"none"` |
+| `batch_size` 🔄 | Number of frames to process simultaneously for faster performance (with sufficient VRAM) | `8` (default) or higher for 12GB+ GPUs |
+| `gpu_memory_allocation` 💻 | Percentage of VRAM to allocate (0.1-0.95) | `0.7` (default, uses 70% of available VRAM) |
 
 ## 🎯 Step-by-Step Guide to PERFECTION 🎯
 
@@ -273,6 +285,22 @@ This creates a SLOWER, more DRAMATIC panning effect with a film grain overlay! �
 }
 ```
 Process ALL your product demos with your corporate branding! 📈
+
+### 🚀 High-VRAM GPU Optimizations 🚀
+
+```json
+{
+    "source": "/videos/high_quality_videos/",
+    "output": "/videos/optimized/",
+    "markpoint1": 5.0,
+    "markpoint2": 50.0,
+    "markpoint3": 90.0,
+    "overlay": "watermark.png",
+    "batch_size": 24,
+    "gpu_memory_allocation": 0.85
+}
+```
+This configuration maximizes performance on 24GB+ VRAM GPUs, processing 24 frames simultaneously and allocating 85% of the available GPU memory for maximum speed! 🏎️💨
 
 ## ⚠️ Limitations ⚠️
 
